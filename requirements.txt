@@ -2,3 +2,4 @@ streamlit
 google-genai==0.1.0
 pandas
 setuptools
+google-api-core
