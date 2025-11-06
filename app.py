@@ -1,7 +1,7 @@
 import streamlit as st
 import google.generativeai as genai
 from google.generativeai import types
-# from google.generativeai.errors import ResourceExhaustedError, APIError
+from google.generativeai.errors import ResourceExhaustedError, APIError
 import time
 import pandas as pd
 import io
@@ -10,8 +10,9 @@ import datetime
 # --- 설정 및 상수 ---
 CHATBOT_TITLE = "🕵️ 미스터리/역사 속으로! AI 롤플레잉 챗봇"
 DEFAULT_MODEL = "gemini-2.0-flash"
-MODEL_CHOICES = ["gemini-2.0-flash", "gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.5-flash-pro"] # 사용 가능한 모델 목록 (exp 제외)
+MODEL_CHOICES = ["gemini-2.0-flash", "gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.5-flash-pro"]
 HISTORY_LIMIT = 6 # 429 에러 발생 시 유지할 최근 대화 턴 수
+RETRY_MAX_ATTEMPTS = 3 # 최대 재시도 횟수
 
 # --- 시스템 프롬프트 ---
 SYSTEM_INSTRUCTION = """
@@ -21,7 +22,7 @@ SYSTEM_INSTRUCTION = """
 3. **마무리 및 유도**: 답변 마지막에는 역사/미스터리에 대한 내용을 다시 한번 더 핵심만 정리해주고, 사용자가 그 이야기에 더욱 빠져들 수 있도록 흥미를 유발합니다. 만일 사용자가 다른 역사/미스터리 이야기를 원하면 롤플레잉을 자연스럽게 멈추고, '다른 시대나 미스터리한 이야기에 대해 궁금한 점이 있으신가요?' 와 같이 새로운 질문이 있는지 친절하게 물어보세요.
 """
 
-# --- API 설정 및 초기화 ---
+# --- 함수 정의 ---
 
 def get_api_key():
     """st.secrets에서 API 키를 가져오거나, 사용자에게 임시 입력 UI를 제공합니다."""
@@ -31,6 +32,7 @@ def get_api_key():
     
     # 2. st.secrets에 없을 경우 임시 입력 UI 표시
     st.info("⚠️ **Streamlit Secrets**에 `GEMINI_API_KEY`가 설정되어 있지 않습니다. 아래 입력창에 **임시** API 키를 입력해주세요.")
+    # API 입력 UI를 별도의 세션 상태 키로 관리하여 재실행 시 상태 유지
     temp_key = st.text_input("Gemini API Key를 입력하세요:", type="password", key="api_input")
     return temp_key
 
@@ -39,13 +41,17 @@ def initialize_gemini_client(api_key):
     try:
         if not api_key:
             return None
+        # 클라이언트 객체를 생성하여 반환합니다.
         return genai.Client(api_key=api_key)
     except Exception as e:
-        st.error(f"API 키 초기화 중 오류 발생: {e}")
+        # Streamlit Cloud에서 초기화 오류가 나면 앱이 멈출 수 있으므로 에러만 기록
+        print(f"API 클라이언트 초기화 중 오류 발생: {e}")
         return None
 
-def initialize_chat(client, system_instruction, model_name):
-    """새로운 채팅 세션을 초기화하고 세션 상태에 저장합니다."""
+def initialize_chat(client, system_instruction, model_name, history):
+    """새로운 채팅 세션을 초기화하고 반환합니다."""
+    if not client:
+        return None
     try:
         config = types.GenerateContentConfig(
             system_instruction=system_instruction
@@ -53,26 +59,26 @@ def initialize_chat(client, system_instruction, model_name):
         chat = client.chats.create(
             model=model_name,
             config=config,
-            history=st.session_state.chat_history
+            history=history
         )
-        st.session_state.chat = chat
+        return chat
     except Exception as e:
         st.error(f"채팅 세션 초기화 중 오류 발생: {e}")
-
-# --- 대화 히스토리 관리 ---
+        return None
 
 def reset_chat_session():
     """대화 세션과 히스토리를 초기화합니다."""
     st.session_state.chat_history = []
-    if 'client' in st.session_state and st.session_state.client:
-        initialize_chat(st.session_state.client, SYSTEM_INSTRUCTION, st.session_state.model_name)
+    # Chat 객체를 None으로 설정하여 main 로직에서 재초기화를 유도
+    st.session_state.chat = None
     st.rerun()
 
 def get_chat_history_for_retry(history, limit):
     """429 에러 발생 시, 최근 N턴만 남기고 히스토리를 잘라냅니다."""
-    # history는 list of Content 객체
-    # 'user'와 'model'이 한 쌍이므로, limit은 짝수로 가정하고 2배를 자릅니다.
-    # 안전하게, 마지막 limit개의 Content 객체를 반환
+    # 마지막 N개의 Content 객체만 유지
+    # 여기서 -1은 마지막 사용자 메시지(재시도할 메시지)를 제외하고 자르기 위함이었으나, 
+    # Streamlit 채팅에서는 Chat 객체 자체가 재시도 시 이전 메시지를 포함하므로,
+    # 여기서는 안전하게 이전 history의 일부만 남깁니다.
     return history[-limit:]
 
 def log_conversation_to_csv(chat_history):
@@ -88,6 +94,7 @@ def log_conversation_to_csv(chat_history):
     
     # CSV 파일로 인코딩 (UTF-8, BOM 포함하여 한글 깨짐 방지)
     csv_buffer = io.StringIO()
+    # encoding='utf-8-sig'를 사용하여 BOM을 추가해 엑셀에서 한글 깨짐 방지
     df.to_csv(csv_buffer, index=False, encoding='utf-8-sig')
     return csv_buffer.getvalue().encode('utf-8-sig')
 
@@ -96,115 +103,176 @@ def log_conversation_to_csv(chat_history):
 st.set_page_config(page_title=CHATBOT_TITLE, layout="wide")
 st.title(CHATBOT_TITLE)
 
-# 사이드바 설정
+# =================================================================
+# 1. 세션 상태 초기화 (AttributeError 방지를 위해 최상단에 위치)
+# =================================================================
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []
+if "model_name" not in st.session_state:
+    st.session_state.model_name = DEFAULT_MODEL
+if "client" not in st.session_state:
+    st.session_state.client = None
+if "chat" not in st.session_state:
+    st.session_state.chat = None
+if "last_api_key" not in st.session_state:
+    st.session_state.last_api_key = None
+if "log_enabled" not in st.session_state:
+    st.session_state.log_enabled = True
+
+
+# =================================================================
+# 2. API 키 설정 및 클라이언트/채팅 객체 초기화 (재시작 로직 포함)
+# =================================================================
+
+api_key = get_api_key()
+
+# API 키 변경 또는 클라이언트가 없을 경우 클라이언트 초기화
+if api_key and (st.session_state.client is None or st.session_state.last_api_key != api_key):
+    st.session_state.client = initialize_gemini_client(api_key)
+    st.session_state.last_api_key = api_key
+    # 클라이언트가 바뀌었으므로 채팅 객체도 초기화
+    st.session_state.chat = initialize_chat(
+        st.session_state.client, 
+        SYSTEM_INSTRUCTION, 
+        st.session_state.model_name, 
+        st.session_state.chat_history
+    )
+
+# 클라이언트가 없으면 앱 중지
+if not st.session_state.client:
+    st.error("Gemini API 클라이언트 초기화에 실패했습니다. 유효한 API 키를 입력해주세요.")
+    st.stop()
+
+
+# 모델이 바뀌었거나 Chat 객체가 없을 경우 초기화
+if st.session_state.chat is None or st.session_state.chat.model_name != st.session_state.model_name:
+    st.session_state.chat = initialize_chat(
+        st.session_state.client, 
+        SYSTEM_INSTRUCTION, 
+        st.session_state.model_name, 
+        st.session_state.chat_history
+    )
+
+
+# =================================================================
+# 3. 사이드바 설정 (UI)
+# =================================================================
+
 with st.sidebar:
     st.header("⚙️ 설정")
     
-    # 1. 모델 선택
+    # 모델 선택 (세션 상태 model_name에 바인딩)
     st.session_state.model_name = st.selectbox(
         "사용할 기본 모델 선택",
         options=MODEL_CHOICES,
         index=MODEL_CHOICES.index(DEFAULT_MODEL),
-        key="model_select"
+        key="model_select",
+        on_change=lambda: st.session_state.update(chat=None) # 모델 변경 시 chat 객체 재초기화 유도
     )
 
     st.markdown("---")
     
-    # 2. 대화 초기화 버튼
+    # 대화 초기화 버튼
     if st.button("🗑️ 대화 초기화", help="현재 대화 기록을 모두 지우고 세션을 새로 시작합니다."):
         reset_chat_session()
 
     st.markdown("---")
     
-    # 3. 로그 기록 옵션 및 다운로드
-    st.session_state.log_enabled = st.checkbox("💾 CSV 로그 자동 기록", value=True, key="log_check", help="모든 대화를 세션 종료 시 자동으로 CSV 파일로 저장합니다.")
+    # 로그 기록 옵션 및 다운로드
+    st.session_state.log_enabled = st.checkbox(
+        "💾 CSV 로그 자동 기록", 
+        value=st.session_state.log_enabled, # 초기화된 값 사용
+        key="log_check", 
+        help="모든 대화를 세션 종료 시 자동으로 CSV 파일로 저장합니다."
+    )
     
+    # 대화 히스토리가 있을 경우 다운로드 버튼 표시
     if st.session_state.chat_history:
-        csv_data = log_conversation_to_csv(st.session_state.chat_history)
-        st.download_button(
-            label="⬇️ 대화 로그 다운로드 (.csv)",
-            data=csv_data,
-            file_name=f"history_log_{datetime.date.today()}.csv",
-            mime="text/csv",
-            help="현재까지의 대화 내용을 CSV 파일로 다운로드합니다."
-        )
+        try:
+            csv_data = log_conversation_to_csv(st.session_state.chat_history)
+            st.download_button(
+                label="⬇️ 대화 로그 다운로드 (.csv)",
+                data=csv_data,
+                file_name=f"history_log_{datetime.date.today()}_{datetime.datetime.now().strftime('%H%M%S')}.csv",
+                mime="text/csv",
+                help="현재까지의 대화 내용을 CSV 파일로 다운로드합니다."
+            )
+        except Exception as e:
+             st.error(f"로그 다운로드 준비 중 오류 발생: {e}")
 
     st.markdown("---")
 
-    # 4. 세션 정보 표시
+    # 세션 정보 표시
     st.subheader("세션 정보")
     st.info(f"**모델:** `{st.session_state.model_name}`\n\n**대화 턴 수:** `{len(st.session_state.chat_history)}`")
 
 
-# --- 메인 앱 로직 ---
+# =================================================================
+# 4. 메인 채팅 인터페이스
+# =================================================================
 
-# 0. API 키 가져오기 및 클라이언트 초기화
-api_key = get_api_key()
-if 'client' not in st.session_state or st.session_state.get('last_api_key') != api_key:
-    st.session_state.client = initialize_gemini_client(api_key)
-    st.session_state.last_api_key = api_key # 키 변경 감지용
-
-if not st.session_state.client:
-    st.warning("Gemini API 키를 설정해주세요.")
-    st.stop()
-
-# 1. 세션 상태 초기화 (대화 기록 및 Chat 객체)
-if "chat_history" not in st.session_state:
-    st.session_state.chat_history = []
-
-if "chat" not in st.session_state or st.session_state.chat.model_name != st.session_state.model_name:
-    # 모델 변경 감지 또는 Chat 객체가 없을 때 새로 초기화
-    initialize_chat(st.session_state.client, SYSTEM_INSTRUCTION, st.session_state.model_name)
-
-# 2. 기존 대화 히스토리 표시
+# 기존 대화 히스토리 표시
 for message in st.session_state.chat_history:
+    # 롤 변환: 'model' -> 'assistant'
     role = "assistant" if message.role == "model" else message.role
     with st.chat_message(role):
         st.markdown(message.parts[0].text)
 
-# 3. 사용자 입력 처리
+# 사용자 입력 처리
 if prompt := st.chat_input("미스터리 또는 역사를 물어보세요..."):
-    # 사용자 메시지 표시
+    
+    # 사용자 메시지 UI에 표시
     with st.chat_message("user"):
         st.markdown(prompt)
 
     # 히스토리에 사용자 메시지 추가
-    st.session_state.chat_history.append(types.Content(role="user", parts=[types.Part.from_text(prompt)]))
+    user_content = types.Content(role="user", parts=[types.Part.from_text(prompt)])
+    st.session_state.chat_history.append(user_content)
 
     # 챗봇 응답 생성 및 429 에러 처리 로직
     with st.chat_message("assistant"):
         message_placeholder = st.empty()
         full_response = ""
         
-        # 429 재시도 로직 (최대 3회 시도)
-        for attempt in range(3):
+        # 429 재시도 로직
+        for attempt in range(RETRY_MAX_ATTEMPTS):
             try:
-                # 스트리밍 응답
+                # Chat 객체의 send_message를 사용 (재시도 시 히스토리 자동 관리)
                 response = st.session_state.chat.send_message(prompt, stream=True)
                 for chunk in response:
                     full_response += chunk.text
                     message_placeholder.markdown(full_response + "▌")
                 message_placeholder.markdown(full_response)
 
-                # 성공 시 히스토리에 챗봇 응답 추가하고 루프 종료
-                st.session_state.chat_history.append(types.Content(role="model", parts=[types.Part.from_text(full_response)]))
+                # 성공 시 챗봇 응답을 히스토리에 추가하고 루프 종료
+                model_content = types.Content(role="model", parts=[types.Part.from_text(full_response)])
+                st.session_state.chat_history.append(model_content)
                 break 
+
             except ResourceExhaustedError:
-                if attempt < 2:
-                    st.warning(f"⚠️ **429 Rate Limit Exceeded** 발생. 잠시 후 재시도합니다. (시도 {attempt + 1}/3)")
+                if attempt < RETRY_MAX_ATTEMPTS - 1:
+                    st.warning(f"⚠️ **429 Rate Limit Exceeded** 발생. 잠시 후 재시도합니다. (시도 {attempt + 1}/{RETRY_MAX_ATTEMPTS})")
                     
-                    # 최근 6턴만 남기고 히스토리를 잘라내고 재시작
+                    # 1. Chat History를 최근 6턴만 남기고 잘라냅니다.
                     new_history = get_chat_history_for_retry(st.session_state.chat_history[:-1], HISTORY_LIMIT) # 마지막 사용자 메시지 제외
                     st.session_state.chat_history = new_history
                     
-                    # 새로운 히스토리로 Chat 객체 재생성
-                    initialize_chat(st.session_state.client, SYSTEM_INSTRUCTION, st.session_state.model_name)
+                    # 2. 새로운 (축약된) 히스토리로 Chat 객체 재생성
+                    st.session_state.chat = initialize_chat(
+                        st.session_state.client, 
+                        SYSTEM_INSTRUCTION, 
+                        st.session_state.model_name, 
+                        st.session_state.chat_history
+                    )
                     
-                    # 지수 백오프 대신 Streamlit 환경을 고려한 고정 대기 시간
+                    # 3. 지수 백오프 방식의 대기 (2초, 4초)
                     time.sleep(2 ** (attempt + 1)) 
+                    
+                    # 4. 재시도 시, 잘려나간 히스토리에 현재 사용자 메시지를 다시 추가
+                    st.session_state.chat_history.append(user_content)
                     continue
                 else:
-                    st.error("❌ **Rate Limit Exceeded**: 할당량 초과. 잠시 후 다시 시도하거나, API 키의 할당량을 확인해주세요. 대화를 초기화합니다.")
+                    st.error("❌ **Rate Limit Exceeded**: 할당량 초과. 더 이상 재시도할 수 없습니다. 대화를 초기화합니다.")
                     reset_chat_session()
                     break
 
@@ -216,6 +284,4 @@ if prompt := st.chat_input("미스터리 또는 역사를 물어보세요..."):
             except Exception as e:
                 st.error(f"❌ **예상치 못한 오류 발생**: {e}. 대화를 초기화합니다.")
                 reset_chat_session()
-
                 break
-
