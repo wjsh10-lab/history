@@ -285,3 +285,5 @@ if prompt := st.chat_input("미스터리 또는 역사를 물어보세요..."):
                 st.error(f"❌ **예상치 못한 오류 발생**: {e}. 대화를 초기화합니다.")
                 reset_chat_session()
                 break
+
+
