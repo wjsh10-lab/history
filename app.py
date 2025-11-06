@@ -1,7 +1,7 @@
 import streamlit as st
 import google.generativeai as genai
 from google.generativeai import types
-from google.generativeai.errors import ResourceExhaustedError, APIError
+# from google.generativeai.errors import ResourceExhaustedError, APIError
 import time
 import pandas as pd
 import io
@@ -189,20 +189,20 @@ if prompt := st.chat_input("미스터리 또는 역사를 물어보세요..."):
                 # 성공 시 히스토리에 챗봇 응답 추가하고 루프 종료
                 st.session_state.chat_history.append(types.Content(role="model", parts=[types.Part.from_text(full_response)]))
                 break 
-
-            except ResourceExhaustedError:
-                if attempt < 2:
-                    st.warning(f"⚠️ **429 Rate Limit Exceeded** 발생. 잠시 후 재시도합니다. (시도 {attempt + 1}/3)")
+            except:
+            # except ResourceExhaustedError:
+            #     if attempt < 2:
+            #         st.warning(f"⚠️ **429 Rate Limit Exceeded** 발생. 잠시 후 재시도합니다. (시도 {attempt + 1}/3)")
                     
-                    # 최근 6턴만 남기고 히스토리를 잘라내고 재시작
-                    new_history = get_chat_history_for_retry(st.session_state.chat_history[:-1], HISTORY_LIMIT) # 마지막 사용자 메시지 제외
-                    st.session_state.chat_history = new_history
+            #         # 최근 6턴만 남기고 히스토리를 잘라내고 재시작
+            #         new_history = get_chat_history_for_retry(st.session_state.chat_history[:-1], HISTORY_LIMIT) # 마지막 사용자 메시지 제외
+            #         st.session_state.chat_history = new_history
                     
-                    # 새로운 히스토리로 Chat 객체 재생성
-                    initialize_chat(st.session_state.client, SYSTEM_INSTRUCTION, st.session_state.model_name)
+            #         # 새로운 히스토리로 Chat 객체 재생성
+            #         initialize_chat(st.session_state.client, SYSTEM_INSTRUCTION, st.session_state.model_name)
                     
-                    # 지수 백오프 대신 Streamlit 환경을 고려한 고정 대기 시간
-                    time.sleep(2 ** (attempt + 1)) 
+            #         # 지수 백오프 대신 Streamlit 환경을 고려한 고정 대기 시간
+            #         time.sleep(2 ** (attempt + 1)) 
                     continue
                 else:
                     st.error("❌ **Rate Limit Exceeded**: 할당량 초과. 잠시 후 다시 시도하거나, API 키의 할당량을 확인해주세요. 대화를 초기화합니다.")
@@ -217,4 +217,5 @@ if prompt := st.chat_input("미스터리 또는 역사를 물어보세요..."):
             except Exception as e:
                 st.error(f"❌ **예상치 못한 오류 발생**: {e}. 대화를 초기화합니다.")
                 reset_chat_session()
+
                 break
